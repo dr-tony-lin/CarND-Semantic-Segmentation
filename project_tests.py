@@ -22,7 +22,7 @@ def test_safe(func):
 
 
 def _prevent_print(function, params):
-    sys.stdout = open(os.devnull, "w")
+    #sys.stdout = open(os.devnull, "w")
     function(**params)
     sys.stdout = sys.__stdout__
 
@@ -81,8 +81,7 @@ def test_load_vgg(load_vgg, tf_module):
 
 
 @test_safe
-def test_layers(layers):
-    num_classes = 2
+def test_layers(layers, num_classes):
     vgg_layer3_out = tf.placeholder(tf.float32, [None, None, None, 256])
     vgg_layer4_out = tf.placeholder(tf.float32, [None, None, None, 512])
     vgg_layer7_out = tf.placeholder(tf.float32, [None, None, None, 4096])
@@ -92,8 +91,7 @@ def test_layers(layers):
 
 
 @test_safe
-def test_optimize(optimize):
-    num_classes = 2
+def test_optimize(optimize, num_classes):
     shape = [2, 3, 4, num_classes]
     layers_output = tf.Variable(tf.zeros(shape))
     correct_label = tf.placeholder(tf.float32, [None, None, None, num_classes])
@@ -111,12 +109,12 @@ def test_optimize(optimize):
 
 
 @test_safe
-def test_train_nn(train_nn):
+def test_train_nn(train_nn, num_classes):
     epochs = 1
     batch_size = 2
 
     def get_batches_fn(batach_size_parm):
-        shape = [batach_size_parm, 2, 3, 3]
+        shape = [batach_size_parm, 2, 3, num_classes]
         return np.arange(np.prod(shape)).reshape(shape)
 
     train_op = tf.constant(0)
