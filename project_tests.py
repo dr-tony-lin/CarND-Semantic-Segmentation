@@ -7,7 +7,6 @@ from unittest import mock
 import numpy as np
 import tensorflow as tf
 
-
 def test_safe(func):
     """
     Isolate tests
@@ -22,7 +21,7 @@ def test_safe(func):
 
 
 def _prevent_print(function, params):
-    #sys.stdout = open(os.devnull, "w")
+    sys.stdout = open(os.devnull, "w")
     function(**params)
     sys.stdout = sys.__stdout__
 
@@ -81,7 +80,7 @@ def test_load_vgg(load_vgg, tf_module):
 
 
 @test_safe
-def test_layers(layers, num_classes):
+def test_layers(layers, num_classes=2):
     vgg_layer3_out = tf.placeholder(tf.float32, [None, None, None, 256])
     vgg_layer4_out = tf.placeholder(tf.float32, [None, None, None, 512])
     vgg_layer7_out = tf.placeholder(tf.float32, [None, None, None, 4096])
@@ -91,12 +90,12 @@ def test_layers(layers, num_classes):
 
 
 @test_safe
-def test_optimize(optimize, num_classes):
+def test_optimize(optimize, num_classes=2):
     shape = [2, 3, 4, num_classes]
     layers_output = tf.Variable(tf.zeros(shape))
     correct_label = tf.placeholder(tf.float32, [None, None, None, num_classes])
     learning_rate = tf.placeholder(tf.float32)
-    logits, train_op, cross_entropy_loss = optimize(layers_output, correct_label, learning_rate, num_classes)
+    logits, train_op, cross_entropy_loss = optimize(layers_output, correct_label, learning_rate)
 
     _assert_tensor_shape(logits, [2*3*4, num_classes], 'Logits')
 
@@ -109,12 +108,12 @@ def test_optimize(optimize, num_classes):
 
 
 @test_safe
-def test_train_nn(train_nn, num_classes):
+def test_train_nn(train_nn):
     epochs = 1
     batch_size = 2
 
     def get_batches_fn(batach_size_parm):
-        shape = [batach_size_parm, 2, 3, num_classes]
+        shape = [batach_size_parm, 2, 3, 3]
         return np.arange(np.prod(shape)).reshape(shape)
 
     train_op = tf.constant(0)

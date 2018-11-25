@@ -6,11 +6,11 @@ import scipy.misc
 import shutil
 import zipfile
 import time
-import tensorflow as tf
+#import tensorflow as tf
 from glob import glob
 from urllib.request import urlretrieve
 from tqdm import tqdm
-
+from skimage.transform import warp, AffineTransform
 
 class DLProgress(tqdm):
     last_block = 0
@@ -57,13 +57,35 @@ def maybe_download_pretrained_vgg(data_dir):
         # Remove zip file to save space
         os.remove(os.path.join(vgg_path, vgg_filename))
 
+def create_image_labels(image, num_classes):
+    background_color = np.array([255, 0, 0])
+    main_road_color = np.array([255, 0, 255])
+    background_color2 = np.array([255, 255, 255])
+    gt_bg = np.logical_or(np.all(image == background_color, axis=2), np.all(image == background_color2, axis=2))
+    #gt_bg = np.all(image == background_color2, axis=2)
+    gt_bg = gt_bg.reshape(*gt_bg.shape, 1)
+    if num_classes == 3:
+        gt_main_road = np.all(image == main_road_color, axis=2)
+        gt_main_road = gt_main_road.reshape(*gt_main_road.shape, 1)
+        #gt_main_road = np.logical_and(gt_main_road, np.invert(gt_bg)) # make sure one hot
+        gt_side_road = np.logical_or(gt_bg, gt_main_road)
+        gt_side_road = np.invert(gt_side_road)
+        gt_bg = gt_bg.astype(int) * 255
+        gt_main_road = gt_main_road.astype(int) * 255
+        gt_side_road = gt_side_road.astype(int) * 255
+        imageLabels = np.concatenate((gt_bg, gt_main_road, gt_side_road), axis=2)
+    else:
+        imageLabels = np.concatenate((gt_bg, np.invert(gt_bg)), axis=2)
+    return imageLabels
 
-def gen_batch_function(data_folder, image_shape, num_classes=2):
+save_augumented = True
+def gen_batch_function(data_folder, image_shape, num_classes=2, augmentation_args=None):
     """
     Generate function to create batches of training data
     :param data_folder: Path to folder that contains all the datasets
     :param image_shape: Tuple - Shape of image
-    :return:
+    :param augmentation_args: the image augmentation arguments, None for no augmentation
+    :return: a generator that returns a sequence of (image, label) 
     """
     def get_batches_fn(batch_size):
         """
@@ -71,39 +93,47 @@ def gen_batch_function(data_folder, image_shape, num_classes=2):
         :param batch_size: Batch Size
         :return: Batches of training data
         """
+        global save_augumented
+        save_augumented = augmentation_args is not None
         image_paths = glob(os.path.join(data_folder, 'image_2', '*.png'))
         label_paths = {
             re.sub(r'_(lane|road)_', '_', os.path.basename(path)): path
             for path in glob(os.path.join(data_folder, 'gt_image_2', '*_road_*.png'))}
-        background_color = np.array([255, 0, 0])
-        main_road_color = np.array([255, 0, 255])
         random.shuffle(image_paths)
+        if save_augumented:
+            augmented_folder = os.path.join(data_folder, 'augmented', time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime()))
+            os.makedirs(augmented_folder)
+            os.makedirs(augmented_folder + "-labels")
+        if augmentation_args is not None:
+            random.seed(augmentation_args['seed'] if 'seed' in augmentation_args else 0)
         for batch_i in range(0, len(image_paths), batch_size):
             images = []
             gt_images = []
             for image_file in image_paths[batch_i:batch_i+batch_size]:
                 gt_image_file = label_paths[os.path.basename(image_file)]
-
                 image = scipy.misc.imresize(scipy.misc.imread(image_file), image_shape)
                 gt_image = scipy.misc.imresize(scipy.misc.imread(gt_image_file), image_shape)
-                
-                gt_bg = np.all(gt_image == background_color, axis=2)
-                gt_bg = gt_bg.reshape(*gt_bg.shape, 1)
-                if num_classes == 3:
-                    gt_main_road = np.all(gt_image == main_road_color, axis=2)
-                    gt_main_road = np.logical_and(gt_main_road.reshape(*gt_main_road.shape, 1), np.invert(gt_bg)) # make sure one hot
-                    gt_side_road = np.logical_or(gt_bg, gt_main_road)
-                    gt_side_road = np.invert(gt_side_road)
-                    gt_image = np.concatenate((gt_bg, gt_main_road, gt_side_road), axis=2)
-                else:
-                    gt_image = np.concatenate((gt_bg, np.invert(gt_bg)), axis=2)
-
-                images.append(image)
+                if augmentation_args is not None:
+                    scalex = 1.0 + random.randint(-100, 100) / 100.0 * (augmentation_args['scale'] if 'scale' in augmentation_args else 0)
+                    scaley = 1.0 + random.randint(-100, 100) / 100.0 * (augmentation_args['scale'] if 'scale' in augmentation_args else 0)
+                    rotation = random.randint(-100, 100) / 100.0 * (augmentation_args['rotate'] if 'rotate' in augmentation_args else 0)
+                    shear = random.randint(-100, 100) / 100.0 * (augmentation_args['shear'] if 'shear' in augmentation_args else 0)
+                    translationx = int(random.randint(-100, 100) / 100.0 * (augmentation_args['translate'] if 'translate' in augmentation_args else 0))
+                    translationy = int(random.randint(-100, 100) / 100.0 * (augmentation_args['translate'] if 'translate' in augmentation_args else 0))
+                    transformation = AffineTransform(scale=(scalex, scaley), rotation=rotation, shear=shear, translation=(translationx, translationy)).inverse
+                    image = warp(image, transformation, output_shape=image.shape, order=1, mode='constant', cval=255, preserve_range=True).astype(int)
+                    gt_image = warp(gt_image, transformation, output_shape=image.shape, order=0, mode='constant', cval=255, preserve_range=True).astype(int)
+                    if save_augumented:
+                        scipy.misc.imsave(os.path.join(augmented_folder, os.path.basename(image_file)), image)
+                        scipy.misc.imsave(os.path.join(augmented_folder, os.path.basename(gt_image_file)), gt_image)
+                gt_image = create_image_labels(gt_image, num_classes)
+                if save_augumented and num_classes == 3:
+                    scipy.misc.imsave(os.path.join(augmented_folder + "-labels", os.path.basename(gt_image_file)), gt_image)
                 gt_images.append(gt_image)
-
+                images.append(image)
             yield np.array(images), np.array(gt_images)
+        save_augumented = False
     return get_batches_fn
-
 
 def gen_test_output(sess, logits, keep_prob, image_pl, data_folder, image_shape, num_classes=2):
     """
@@ -136,10 +166,9 @@ def gen_test_output(sess, logits, keep_prob, image_pl, data_folder, image_shape,
             street_im.paste(mask, box=None, mask=mask)
         yield os.path.basename(image_file), np.array(street_im)
 
-
 def save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, input_image, num_classes=2):
     # Make folder for current run
-    output_dir = os.path.join(runs_dir, str(time.time()))
+    output_dir = os.path.join(runs_dir, time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime()))
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)

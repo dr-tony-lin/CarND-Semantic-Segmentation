@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os.path
+import time
 import tensorflow as tf
 import helper
 import warnings
@@ -22,10 +23,11 @@ num_classes = 3
 epochs = 250
 batch_size = 16
 dropout_keep = 0.5
-l2_scale = 1e-2
+one_by_one_channels = 2048
+l2_scale = 1e-4
 lr = 1e-4
-target_loss = 0.01
-loss_to_save = 0.015
+target_loss = 0.008
+loss_to_save = 0.009
 
 def load_vgg(sess, vgg_path):
     """
@@ -52,31 +54,76 @@ def load_vgg(sess, vgg_path):
     vgg_layer7_out = graph.get_tensor_by_name('layer7_out:0')
     return vgg_input, vgg_keep_prob, vgg_layer3_out, vgg_layer4_out, vgg_layer7_out
 
-def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes, l2_regularizer_scale=l2_scale):
+def layers_regularizer(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes, one_by_one_channels=21, l2_regularizer_scale=l2_scale):
     """
     Create the layers for a fully convolutional network.  Build skip-layers using the vgg layers.
     :param vgg_layer3_out: TF Tensor for VGG Layer 3 output
     :param vgg_layer4_out: TF Tensor for VGG Layer 4 output
     :param vgg_layer7_out: TF Tensor for VGG Layer 7 output
+    :param one_by_one_channels: number of channels output from the one by one convolution layer
     :param num_classes: Number of classes to classify
+    :param l2_regularizer_scale: the regularizer scale 
     :return: The Tensor for the last layer of output
     """
-    layer8_1by1_out = tf.layers.conv2d(vgg_layer7_out, num_classes, 1, strides=(1,1), padding='same',
+    layer8_1by1_out = tf.layers.conv2d(vgg_layer7_out, one_by_one_channels, 1, strides=(1,1), padding='same',
                                         kernel_regularizer=tf.contrib.layers.l2_regularizer(l2_regularizer_scale)) # 1x1
     layer9_out = tf.layers.conv2d_transpose(layer8_1by1_out, vgg_layer4_out.get_shape()[-1], 4, strides=(2,2), padding='same',
                                         kernel_regularizer=tf.contrib.layers.l2_regularizer(l2_regularizer_scale)) #2x2
-    print(vgg_layer4_out.get_shape(), " add to ", layer9_out.get_shape())
-    layer10_in = tf.add(vgg_layer4_out, layer9_out) # skip kayer 4
+    layer10_in = tf.add(vgg_layer4_out, layer9_out) # skip pool 4
     layer10_out = tf.layers.conv2d_transpose(layer10_in, vgg_layer3_out.get_shape()[-1], 4, strides=(2,2), padding='same',
                                         kernel_regularizer=tf.contrib.layers.l2_regularizer(l2_regularizer_scale)) # 4x4
-    print(vgg_layer3_out.get_shape(), " add to ", layer10_out.get_shape())
-    layer11_in =  tf.add(vgg_layer3_out, layer10_out)
+    layer11_in =  tf.add(vgg_layer3_out, layer10_out) # Skip pool 3
     layer11_out = tf.layers.conv2d_transpose(layer11_in, num_classes, 16, strides=(8,8), padding='same',
-                                        kernel_regularizer=tf.contrib.layers.l2_regularizer(l2_regularizer_scale), name='layer11_out') # 32 x 32
-
+                                        kernel_regularizer=tf.contrib.layers.l2_regularizer(l2_regularizer_scale), name='decoder_out') # 32 x 32
     return layer11_out
 
-def optimize(nn_last_layer, correct_label, learning_rate):
+def layers_dropout(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, vgg_keep_prob, num_classes=2, one_by_one_channels=21):
+    """
+    Create the layers for a fully convolutional network.  Build skip-layers using the vgg layers.
+    :param vgg_layer3_out: TF Tensor for VGG Layer 3 output
+    :param vgg_layer4_out: TF Tensor for VGG Layer 4 output
+    :param vgg_layer7_out: TF Tensor for VGG Layer 7 output
+    :param one_by_one_channels: number of channels output from the one by one convolution layer
+    :param num_classes: Number of classes to classify
+    :param vgg_keep_prob the keep proability of VGG's dropout layers
+    :return: The Tensor for the last layer of output
+    """
+    layer8_1by1_out = tf.layers.conv2d(layer7_dropout, one_by_one_channels, 1, strides=(1,1), padding='same') # 1x1
+    layer8_1by1_dropout = tf.layers.dropout(layer8_1by1_out, rate=vgg_keep_prob)
+    layer9_out = tf.layers.conv2d_transpose(layer8_1by1_dropout, vgg_layer4_out.get_shape()[-1], 4, strides=(2,2), padding='same') #2x2
+    layer10_in = tf.add(vgg_layer4_out, layer9_out) # skip pool 4
+    layer10_dropout = tf.layers.dropout(layer10_in, rate=vgg_keep_prob)
+    layer10_out = tf.layers.conv2d_transpose(layer10_dropout, vgg_layer3_out.get_shape()[-1], 4, strides=(2,2), padding='same') # 4x4
+    layer11_in =  tf.add(vgg_layer3_out, layer10_out) # Skip pool 3
+    layer11_dropout = tf.layers.dropout(layer11_in, rate=vgg_keep_prob)
+    layer11_out = tf.layers.conv2d_transpose(layer11_dropout, num_classes, 16, strides=(8,8), padding='same', name='decoder_out') # 32 x 32
+    return layer11_out
+
+def layers_deep(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, vgg_keep_prob, num_classes, one_by_one_channels=21):
+    """
+    Create the layers for a fully convolutional network.  Build skip-layers using the vgg layers.
+    :param vgg_layer3_out: TF Tensor for VGG Layer 3 output
+    :param vgg_layer4_out: TF Tensor for VGG Layer 4 output
+    :param vgg_layer7_out: TF Tensor for VGG Layer 7 output
+    :param one_by_one_channels: number of channels output from the one by one convolution layer
+    :param num_classes: Number of classes to classify
+    :param vgg_keep_prob the keep proability of VGG's dropout layers
+    :return: The Tensor for the last layer of output
+    """
+    layer8_1by1_out = tf.layers.conv2d(vgg_layer7_out, one_by_one_channels, 1, strides=(1,1), padding='same') # 1x1
+    layer8_1by1_dropout = tf.layers.dropout(layer8_1by1_out, rate=vgg_keep_prob)
+    layer9_out = tf.layers.conv2d_transpose(layer8_1by1_dropout, vgg_layer4_out.get_shape()[-1], 4, strides=(2,2), padding='same') #2x2
+    layer10_in = tf.add(vgg_layer4_out, layer9_out) # skip pool 4
+    layer10_dropout = tf.layers.dropout(layer10_in, rate=vgg_keep_prob)
+    layer10_out = tf.layers.conv2d_transpose(layer10_dropout, vgg_layer3_out.get_shape()[-1], 4, strides=(2,2), padding='same') # 4x4
+    layer11_in =  tf.add(vgg_layer3_out, layer10_out) # Skip pool 3
+    layer11_dropout= tf.layers.dropout(layer11_in, rate=vgg_keep_prob)
+    layer11_out = tf.layers.conv2d_transpose(layer11_dropout, 32, 8, strides=(4,4), padding='same') # 16 x 16
+    layer12_in = tf.layers.dropout(layer11_out, rate=vgg_keep_prob)
+    layer12_out = tf.layers.conv2d_transpose(layer12_in, num_classes, 4, strides=(2,2), padding='same', name='decoder_out') # 32 x 32
+    return layer12_out
+
+def optimize(nn_last_layer, correct_label, learning_rate=lr):
     """
     Build the TensorFLow loss and optimizer operations.
     :param nn_last_layer: TF Tensor of the last layer in the neural network
@@ -85,9 +132,9 @@ def optimize(nn_last_layer, correct_label, learning_rate):
     :return: Tuple of (logits, train_op, cross_entropy_loss)
     """
     num_classes = nn_last_layer.get_shape()[-1]
-    print("Num classes: ", num_classes, ", ", nn_last_layer.get_shape())
-    logits = tf.reshape(nn_last_layer, (-1, num_classes), name='segmentation_logits')
-    correct_label = tf.reshape(correct_label, (-1, num_classes))
+    shape = np.asarray([-1, num_classes])
+    logits = tf.reshape(nn_last_layer, shape, name='segmentation_logits')
+    correct_label = tf.reshape(correct_label, shape)
     cross_entropy_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=correct_label))
     train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cross_entropy_loss)
     return logits, train_op, cross_entropy_loss
@@ -109,13 +156,17 @@ def train_nn(sess, epochs, batch_size, get_batches_fn, train_op, cross_entropy_l
     :param l2_regularizer_scale: TF Placeholder for l2 regularizer scale
     """
     sess.run(tf.global_variables_initializer())
+    model_save_dir = os.path.join("models", time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime()))
+    if not os.path.exists(model_save_dir):
+        os.makedirs(model_save_dir)
+    losses = []
     for epoch in range(epochs):
         total_loss = 0
-        total_images = 0
+        total_batches = 0
         start = timer()
         for images, gt in get_batches_fn(batch_size):
             labels = np.reshape(gt, (-1, gt.shape[-1])).astype(np.float32)
-            labels = (labels.T / labels.sum(1)).T # normalize each row, here we alow a pixel to be in more than one class, but cannot be in no class
+            #labels = (labels.T / labels.sum(1)).T # normalize each row, here we alow a pixel to be in more than one class, but cannot be in no class
             _, loss = sess.run([train_op, cross_entropy_loss], 
                                 feed_dict={  
                                     input_image: images,
@@ -123,14 +174,18 @@ def train_nn(sess, epochs, batch_size, get_batches_fn, train_op, cross_entropy_l
                                     learning_rate: lr,
                                     keep_prob: dropout_keep})
             total_loss += loss 
-            total_images += 1
+            total_batches += 1
         end = timer()
-        mean_loss = total_loss / total_images
-        print("Epoch: ", epoch, ", time: ", end - start, ", total loss: ", total_loss, ", images: " , total_images, ", average loss: ", mean_loss)
+        elasped = end - start
+        mean_loss = total_loss / total_batches
+        losses.append([mean_loss, elasped])
+        print("Epoch: ", epoch, ", time: ", elasped, ", total loss: ", total_loss, ", batches: " , total_batches, ", average loss: ", mean_loss)
         if mean_loss < loss_to_save:
-            helper.save_model(sess, "models", "model{lr}".replace('.', '-'), epoch)
+            suffix = int(mean_loss * 10000)
+            helper.save_model(sess, model_save_dir, "model-" + suffix, epoch)
         if mean_loss < target_loss:
-            return loss
+            break
+    np.save(os.path.join(model_save_dir, 'training_losses'), losses)
     return loss
 
 def run():
@@ -149,21 +204,23 @@ def run():
     with tf.Session() as sess:
         # Path to vgg model
         vgg_path = os.path.join(data_dir, 'vgg')
+        #augmentation_args = {'seed': 1123, 'scale': 0.05, 'rotate':0.03, 'shear': 0.03, 'translate':16}
+        augmentation_args = None
         # Create function to get batches
-        get_batches_fn = helper.gen_batch_function(os.path.join(data_dir, 'data_road/training'), image_shape, num_classes)
-
-        # OPTIONAL: Augment Images for better results
-        #  https://datascience.stackexchange.com/questions/5224/how-to-prepare-augment-images-for-neural-network
-
+        get_batches_fn = helper.gen_batch_function(os.path.join(data_dir, 'data_road/training'), image_shape, num_classes,
+                                augmentation_args=augmentation_args)
+        
         # Build NN using load_vgg, layers, and optimize function
         vgg_input, vgg_keep_prob, vgg_layer3_out, vgg_layer4_out, vgg_layer7_out = load_vgg(sess, vgg_path)
-        #l2_regularizer_scale = tf.placeholder(tf.float32, name='l2_regularizer_scale')
-        layer11_out = layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes, l2_scale)
+
+        graph_out = layers_regularizer(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes, one_by_one_channels, l2_scale)
+        #graph_out = layers_dropout(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, vgg_keep_prob, num_classes, one_by_one_channels)
+        #graph_out = layers_deep(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, vgg_keep_prob, num_classes, one_by_one_channels)
 
         labels = tf.placeholder(tf.bool, name='correct_label')
         learning_rate = tf.placeholder(tf.float32, name='learning_rate')
 
-        logits, train_op, cross_entropy_loss = optimize(layer11_out, labels, learning_rate)
+        logits, train_op, cross_entropy_loss = optimize(graph_out, labels, learning_rate)
 
         # Train NN using the train_nn function
         train_nn(sess, epochs, batch_size, get_batches_fn, train_op, cross_entropy_loss, vgg_input, labels, vgg_keep_prob, 
@@ -173,10 +230,10 @@ def run():
         helper.save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, vgg_keep_prob, vgg_input, num_classes)
         # OPTIONAL: Apply the trained model to a video
 
-#tests.test_load_vgg(load_vgg, tf)
-#tests.test_layers(layers, num_classes)
-#tests.test_optimize(optimize)
-#tests.test_train_nn(train_nn, num_classes)
+tests.test_load_vgg(load_vgg, tf)
+tests.test_layers(layers_regularizer, num_classes)
+tests.test_optimize(optimize, num_classes)
+tests.test_train_nn(train_nn)
 
 if __name__ == '__main__':
     run()
